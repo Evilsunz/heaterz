@@ -1,0 +1,8 @@
+espflash erase-flash
+
+cargo espflash flash --monitor
+cargo espflash flash --release
+
+cargo espflash erase-flash
+
+espflash board-info
