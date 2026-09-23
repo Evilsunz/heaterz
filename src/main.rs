@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     wifi.set_configuration(&Configuration::Client(
         ClientConfiguration {
             ssid: heapless::String::try_from("USG Ishimura").unwrap(),
-            password: heapless::String::try_from("illuminati").unwrap(),
+            password: heapless::String::try_from("pswd").unwrap(),
             ..Default::default()
         },
     ))?;
