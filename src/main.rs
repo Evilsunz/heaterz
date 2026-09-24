@@ -11,9 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::SystemTime;
+use esp_idf_svc::http::server::{EspHttpConnection, Request};
 
 static FILE_PATH: &str = "/littlefs/log.csv";
+static FILE_LOCK: Mutex<()> = Mutex::new(());
 
 fn main() -> anyhow::Result<()> {
     link_patches();
@@ -85,21 +88,12 @@ fn main() -> anyhow::Result<()> {
     let mut server = EspHttpServer::new(&config)?;
 
     server.fn_handler("/", esp_idf_svc::http::Method::Get, |request| {
-        if let Err(e) = read_log() {
-            println!("Error reading log file : {:?}", e);
-        }
-
-        // let text = std::fs::read_to_string(FILE_PATH).unwrap();
-        // println!("read file: {}", text);
-        let html = r#"Heaterz !!!!"#;
-        let mut response = request.into_ok_response()?;
-        response.write(html.as_bytes())?;
-        Ok::<(), EspIOError>(())
+       handle_get_logs(request)
     })?;
 
 
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_secs(60));
         let ip_info = wifi.sta_netif().get_ip_info()?;
         println!("IP: {:?}", ip_info.ip);
         let wattz = Wattz{
@@ -120,6 +114,7 @@ struct Wattz {
 }
 
 fn append_log(record: &Wattz) -> anyhow::Result<()> {
+    let _guard = FILE_LOCK.lock().unwrap();
     let file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -133,19 +128,27 @@ fn append_log(record: &Wattz) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_log() -> anyhow::Result<()> {
-    let file = File::open(FILE_PATH)?;
-    let buf_reader = BufReader::new(file);
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(false)
-        //.flexible(true)
-        .terminator(csv::Terminator::Any(b'\n'))
-        .from_reader(buf_reader);
-    for result in rdr.deserialize() {
-        let record: Wattz = result?;
-        println!("{:?}", record);
+fn read_log() -> anyhow::Result<Vec<Wattz>> {
+    let _guard = FILE_LOCK.lock().unwrap();
+    if !Path::new(FILE_PATH).exists() {
+        println!("File empty or not created.");
+        return Ok(vec![]);
     }
-    Ok(())
+    let mut output = Vec::<Wattz>::new();
+    {
+        let file = File::open(FILE_PATH)?;
+        let buf_reader = BufReader::new(file);
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_reader(buf_reader);
+        for result in rdr.deserialize::<Wattz>() {
+            let record = result?;
+            output.push(record);
+        }
+    }
+    std::fs::remove_file(FILE_PATH)?;
+    Ok(output)
 }
 
 fn get_current_timestamp() -> u32 {
@@ -153,4 +156,28 @@ fn get_current_timestamp() -> u32 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs() as u32
+}
+
+fn handle_get_logs(request: Request<&mut EspHttpConnection>) -> Result<(), EspIOError> {
+    let output = match read_log() {
+        Ok(res) => {res}
+        Err(err) => {
+            println!("Error reading log: {}", err);
+            vec![]
+        }
+    };
+
+    let json_string = serde_json::to_string(&output);
+
+    let mut response = request.into_response(
+        200,
+        Some("OK"),
+        &[
+            ("Content-Type", "application/json"),
+            ("Connection", "close")
+        ]
+    )?;
+
+    response.write(json_string.unwrap().as_bytes())?;
+    Ok::<(), EspIOError>(())
 }
