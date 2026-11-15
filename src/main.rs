@@ -1,12 +1,13 @@
-use esp_idf_svc::sys::*;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::http::server::{EspHttpServer};
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::wifi::{ClientConfiguration, Configuration, EspWifi, };
-use esp_idf_svc::mdns::{EspMdns, Interface, Protocol, QueryResult};
+use esp_idf_svc::http::server::EspHttpServer;
+use esp_idf_svc::http::server::{EspHttpConnection, Request};
 use esp_idf_svc::io::EspIOError;
+use esp_idf_svc::mdns::{EspMdns, Interface, Protocol, QueryResult};
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
+use esp_idf_svc::sys::*;
+use esp_idf_svc::wifi::{ClientConfiguration, Configuration, EspWifi};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
@@ -14,7 +15,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
-use esp_idf_svc::http::server::{EspHttpConnection, Request};
 
 static FILE_PATH: &str = "/littlefs/log.csv";
 static FILE_LOCK: Mutex<()> = Mutex::new(());
@@ -48,18 +48,12 @@ fn main() -> anyhow::Result<()> {
     let peripherals = Peripherals::take()?;
     let sysloop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let mut wifi = EspWifi::new(
-        peripherals.modem,
-        sysloop,
-        Some(nvs),
-    )?;
-    wifi.set_configuration(&Configuration::Client(
-        ClientConfiguration {
-            ssid: heapless::String::try_from("CMS Roanoke").unwrap(),
-            password: heapless::String::try_from("dead__space").unwrap(),
-            ..Default::default()
-        },
-    ))?;
+    let mut wifi = EspWifi::new(peripherals.modem, sysloop, Some(nvs))?;
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+        ssid: heapless::String::try_from("CMS Roanoke").unwrap(),
+        password: heapless::String::try_from("dead__space").unwrap(),
+        ..Default::default()
+    }))?;
 
     wifi.start()?;
     wifi.connect()?;
@@ -94,15 +88,14 @@ fn main() -> anyhow::Result<()> {
     let mut server = EspHttpServer::new(&config)?;
 
     server.fn_handler("/", esp_idf_svc::http::Method::Get, |request| {
-       handle_get_logs(request)
+        handle_get_logs(request)
     })?;
-
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
         let ip_info = wifi.sta_netif().get_ip_info()?;
         println!("IP: {:?}", ip_info.ip);
-        let wattz = Wattz{
+        let wattz = Wattz {
             source: "priza1".to_string(),
             wattz: 0,
             date: get_current_timestamp(),
@@ -209,7 +202,10 @@ fn scan_shelly_devices(wifi: &EspWifi<'_>) -> anyhow::Result<Vec<ShellyDevice>> 
                             .filter(|n| !n.is_empty())
                             .unwrap_or_else(|| id.clone());
 
-                        println!("Foung plug:Name={}, IP={}, ID={}, Model={}",name, target_ip, id, model);
+                        println!(
+                            "Found plug:Name={}, IP={}, ID={}, Model={}",
+                            name, target_ip, id, model
+                        );
                         found.push(ShellyDevice {
                             ip: target_ip,
                             id,
@@ -239,13 +235,10 @@ fn get_current_timestamp() -> u32 {
 }
 
 fn handle_get_logs(request: Request<&mut EspHttpConnection>) -> Result<(), EspIOError> {
-    let output = match read_log() {
-        Ok(res) => {res}
-        Err(err) => {
-            println!("Error reading log: {}", err);
-            vec![]
-        }
-    };
+    let output = read_log().unwrap_or_else(|err| {
+        println!("Error reading log: {}", err);
+        vec![]
+    });
 
     let json_string = serde_json::to_string(&output);
 
@@ -254,8 +247,8 @@ fn handle_get_logs(request: Request<&mut EspHttpConnection>) -> Result<(), EspIO
         Some("OK"),
         &[
             ("Content-Type", "application/json"),
-            ("Connection", "close")
-        ]
+            ("Connection", "close"),
+        ],
     )?;
 
     response.write(json_string.unwrap().as_bytes())?;
