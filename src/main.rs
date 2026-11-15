@@ -157,32 +157,6 @@ fn read_log() -> anyhow::Result<Vec<Wattz>> {
     Ok(output)
 }
 
-fn scan_mdns(mdns: &EspMdns) -> anyhow::Result<()> {
-    let mut results = Vec::with_capacity(20);
-    // for _ in 0..20 {
-    //     results.push(QueryResult {
-    //         instance_name: None,
-    //         hostname: None,
-    //         port: 0,
-    //         txt: Vec::new(),
-    //         addr: Vec::new(),
-    //         interface: Interface::STA,
-    //         ip_protocol: Protocol::V4,
-    //     });
-    // }
-
-    let count = mdns.query_ptr("_http", "_tcp", Duration::from_secs(2), 20, &mut results)?;
-
-    for item in &results[..count] {
-        println!(
-            "Found: {:?} ({:?}:{}) -> {:?}",
-            item.instance_name, item.hostname, item.port, item.addr
-        );
-    }
-
-    Ok(())
-}
-
 #[derive(Debug)]
 struct ShellyDevice {
     ip: String,
