@@ -6,3 +6,6 @@ cargo espflash flash --release
 cargo espflash erase-flash
 
 espflash board-info
+
+
+dns-sd -B _http._tcp

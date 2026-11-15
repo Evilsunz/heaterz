@@ -4,15 +4,16 @@ use esp_idf_svc::http::server::{EspHttpServer};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use esp_idf_svc::wifi::{ClientConfiguration, Configuration, EspWifi, };
-use esp_idf_svc::mdns::EspMdns;
+use esp_idf_svc::mdns::{EspMdns, Interface, Protocol, QueryResult};
 use esp_idf_svc::io::EspIOError;
 use esp_idf_svc::sntp::{EspSntp, SyncStatus};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::BufReader;
+use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use esp_idf_svc::http::server::{EspHttpConnection, Request};
 
 static FILE_PATH: &str = "/littlefs/log.csv";
@@ -37,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
         println!("mount rc = {}", rc);
 
-        if rc != ESP_OK as i32 {
+        if rc != ESP_OK {
             panic!("LittleFS mount failed: {}", rc);
         }
     }
@@ -54,18 +55,20 @@ fn main() -> anyhow::Result<()> {
     )?;
     wifi.set_configuration(&Configuration::Client(
         ClientConfiguration {
-            ssid: heapless::String::try_from("USG Ishimura").unwrap(),
-            password: heapless::String::try_from("pwd").unwrap(),
+            ssid: heapless::String::try_from("CMS Roanoke").unwrap(),
+            password: heapless::String::try_from("dead__space").unwrap(),
             ..Default::default()
         },
     ))?;
+
     wifi.start()?;
     wifi.connect()?;
-    while !wifi.is_connected()? {
+    while !wifi.is_up()? {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    println!("WiFi connected");
+    let ip_info = wifi.sta_netif().get_ip_info()?;
+    println!("WiFi connected, IP: {}", ip_info.ip);
 
     let _sntp = EspSntp::new_default()?;
     loop {
@@ -82,7 +85,10 @@ fn main() -> anyhow::Result<()> {
 
     println!("Mdns published + fqdn heaterz.local");
 
-    std::fs::remove_file(FILE_PATH).unwrap();
+    // discover_all_services(&mdns)?;
+    let _plugs = scan_shelly_devices(&wifi)?;
+    //println!("plugs = {:#?}", plugs);
+    //std::fs::remove_file(FILE_PATH)?;
 
     let config = esp_idf_svc::http::server::Configuration::default();
     let mut server = EspHttpServer::new(&config)?;
@@ -149,6 +155,106 @@ fn read_log() -> anyhow::Result<Vec<Wattz>> {
     }
     std::fs::remove_file(FILE_PATH)?;
     Ok(output)
+}
+
+fn scan_mdns(mdns: &EspMdns) -> anyhow::Result<()> {
+    let mut results = Vec::with_capacity(20);
+    // for _ in 0..20 {
+    //     results.push(QueryResult {
+    //         instance_name: None,
+    //         hostname: None,
+    //         port: 0,
+    //         txt: Vec::new(),
+    //         addr: Vec::new(),
+    //         interface: Interface::STA,
+    //         ip_protocol: Protocol::V4,
+    //     });
+    // }
+
+    let count = mdns.query_ptr("_http", "_tcp", Duration::from_secs(2), 20, &mut results)?;
+
+    for item in &results[..count] {
+        println!(
+            "Found: {:?} ({:?}:{}) -> {:?}",
+            item.instance_name, item.hostname, item.port, item.addr
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ShellyDevice {
+    ip: String,
+    id: String,
+    name: String,
+    model: String,
+}
+
+use std::io::{Read, Write};
+
+fn scan_shelly_devices(wifi: &EspWifi<'_>) -> anyhow::Result<Vec<ShellyDevice>> {
+    let mut found = Vec::new();
+    let ip_info = wifi.sta_netif().get_ip_info()?;
+    let octets = ip_info.ip.octets();
+    let subnet = format!("{}.{}.{}", octets[0], octets[1], octets[2]);
+
+    println!("Scanning subnet {}.0/24 for Shellys...", subnet);
+
+    let timeout = Duration::from_millis(120);
+
+    for last_octet in 1..=254 {
+        if last_octet == octets[3] || last_octet == 1 {
+            continue;
+        }
+
+        let target_ip = format!("{}.{}", subnet, last_octet);
+        let addr_str = format!("{}:80", target_ip);
+
+        let Ok(addr) = addr_str.parse::<SocketAddr>() else {
+            continue;
+        };
+
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(300)));
+            let req = format!(
+                "GET /rpc/Shelly.GetDeviceInfo HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                target_ip
+            );
+
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut buf = [0u8; 1024];
+                if let Ok(len) = stream.read(&mut buf) {
+                    let response = core::str::from_utf8(&buf[..len]).unwrap_or("");
+
+                    if response.to_lowercase().contains("shellyplug") {
+                        let id = extract_json_str(response, "\"id\":\"").unwrap_or_default();
+                        let model = extract_json_str(response, "\"model\":\"").unwrap_or_default();
+                        let name = extract_json_str(response, "\"name\":\"")
+                            .filter(|n| !n.is_empty())
+                            .unwrap_or_else(|| id.clone());
+
+                        println!("Foung plug:Name={}, IP={}, ID={}, Model={}",name, target_ip, id, model);
+                        found.push(ShellyDevice {
+                            ip: target_ip,
+                            id,
+                            name,
+                            model,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(found)
+}
+
+fn extract_json_str(json: &str, key: &str) -> Option<String> {
+    let start = json.find(key)? + key.len();
+    let end = json[start..].find('"')? + start;
+    Some(json[start..end].to_string())
 }
 
 fn get_current_timestamp() -> u32 {
